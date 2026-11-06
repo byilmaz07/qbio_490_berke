@@ -1,0 +1,151 @@
+---
+title: "Methylation vs Transcription"
+author: "Berke Yilmaz"
+date: "2026-10-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = normalizePath("/home1/byilmaz/490_cluster/analysis_data/"))
+```
+
+```{r}
+library(limma)
+library(DESeq2)
+```
+
+```{r}
+methylation_clinical <- read.csv('brca_methylation_clinical.csv', row.names = 1)
+betas <- read.csv('brca_methylation_betas.csv', row.names=1)
+cpg_sites <- read.csv('brca_cpg_sites.csv', row.names = 1)
+```
+
+
+```{r}
+#masking out samples that are not Metastatic or Primary solid Tumor
+definition_mask <- methylation_clinical$definition %in% c("Metastatic", "Primary solid Tumor")
+methylation_clinical <- methylation_clinical[definition_mask,]
+betas_clean <- betas[,definition_mask]
+
+#define your comparison and base group
+primary_mask <- methylation_clinical$definition == "Primary solid Tumor"
+methylation_clinical$metastatic <- !primary_mask
+
+#fitting linear models using a "target value"
+mval <- t(apply(betas_clean, 1, function(x) log2(x/(1-x)))) 
+
+#fit linear models
+design <- model.matrix(~ metastatic, data = methylation_clinical)
+fit <- lmFit(mval, design)
+fit2 <- eBayes(fit)
+```
+
+```{r}
+# Extracting model into dataframe
+dat <- data.frame(foldchange = fit[["coefficients"]][,2], logPvalue =  -log10(p.adjust(fit2[["p.value"]][,2],method='BY')), geneName = cpg_sites$gene)
+```
+
+```{r}
+rna_clinical <- read.csv("brca_rna_clinical_data.csv", row.names = 1)
+rna_genes <- read.csv("brca_rna_gene_data.csv")
+rna_counts <- read.csv("brca_rna_count_data.csv",
+                       row.names = 1,
+                       check.names = FALSE)
+```
+
+```{r}
+rna_mask <- rna_clinical$definition %in% c("Metastatic", "Primary solid Tumor")
+
+rna_clinical <- rna_clinical[rna_mask,]
+rna_counts <- rna_counts[,rna_mask]
+
+rna_clinical$definition <- as.factor(rna_clinical$definition)
+rna_clinical$age_category <- as.factor(rna_clinical$age_category)
+
+gene_mask <- rowSums(rna_counts) >= 20
+
+rna_counts <- rna_counts[gene_mask,]
+rna_genes <- rna_genes[gene_mask,]
+```
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = rna_counts,
+                              colData = rna_clinical,
+                              design= ~ age_category + definition)
+
+dds_obj <- DESeq(dds)
+
+resultsNames(dds_obj)
+
+results <- results(dds_obj, format = "DataFrame", contrast = c("definition", "Metastatic" , "Primary solid Tumor"))
+
+results <- data.frame(results)
+
+results$gene_name <- rna_genes$gene_name[match(rownames(results), rna_genes$gene_id)]
+
+write.csv(
+  results,
+  "deSeq_results_metastasis.csv",
+  row.names = TRUE
+)
+
+de_results <- read.csv(
+  "deSeq_results_metastasis.csv",
+  row.names = 1
+)
+```
+
+```{r}
+downregulated <- de_results[!is.na(de_results$padj) & de_results$padj < 0.05 & de_results$log2FoldChange < -1, 'gene_name']
+hypermethylated <- dat[dat$foldchange > 1, 'geneName'] #what cutoff should you use here?
+interest_genes <- intersect(downregulated, hypermethylated)
+
+length(downregulated)
+length(hypermethylated)
+interest_genes
+```
+
+```{r}
+GENE<-"ZFHX4"
+
+gene_counts_mask <- rna_genes$gene_name == GENE
+gene_betas_mask <- cpg_sites$gene == GENE
+
+#What are we doing here?
+rna_clinical_primary <- rna_clinical$definition == "Primary solid Tumor"
+methylation_clinical_primary <- methylation_clinical$definition == "Primary solid Tumor"
+
+rna_clinical_metastatic <- rna_clinical$definition == "Metastatic"
+methylation_clinical_metastatic <- methylation_clinical$definition == "Metastatic"
+
+#What are we doing here?
+rna_primary <- as.numeric(rna_counts[gene_counts_mask, rna_clinical_primary])
+methylation_primary <- (betas_clean[gene_betas_mask, methylation_clinical_primary])
+
+rna_metastatic <- as.numeric(rna_counts[gene_counts_mask, rna_clinical_metastatic])
+methylation_metastatic <- (betas_clean[gene_betas_mask, methylation_clinical_metastatic])
+```
+
+```{r}
+boxplot(rna_primary, rna_metastatic, xlab='Group', ylab='Counts', names=c('Primary solid Tumor', 'Metastatic'),
+        col=c("blue","red"))
+
+```
+
+```{r}
+
+# Show methylation differences at CpG sites in this gene 
+plot(1:dim(methylation_primary)[1], apply(methylation_primary, 1, mean), col='blue', type='h', lwd=3, ylab='Average Beta', xlab='CpG sites')
+
+lines(1.3:(dim(methylation_metastatic)[1]+0.3), apply(methylation_metastatic, 1, mean), col='red', type='h', lwd=3)
+
+legend("topright",
+       legend=c("Primary solid Tumor", "Metastatic"),
+       col=c("blue", "red"),
+       lwd=3,
+       cex=0.7)
+
+```
+
+#DESCRIPTION: ZFHX4 showed lower RNA expression in the metastatic samples when compared with the Primary solid Tumor samples (which makes sense because it is downregulated in metastasis). The CpG methylation plot shows that methylation varies across the individual ZFHX4 CpG sites and metastatic samples have higher methylation at some sites and lower at others. Overall, both plots show that there is an association between methylation change and reduced ZFHX4 transcriptional activity in metastatic samples. 
